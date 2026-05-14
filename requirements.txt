@@ -1,0 +1,17 @@
+discord.py[voice]
+plyer
+aiohttp
+aiofiles
+pyautogui
+chardet
+psutil
+pyttsx3
+sounddevice
+pynput
+Pillow
+requests
+numpy
+pycaw
+pycryptodome
+comtypes
+python-dotenv
