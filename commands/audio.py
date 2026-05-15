@@ -7,6 +7,7 @@ import subprocess
 
 import discord
 import pyttsx3
+import platform
 import requests
 import sounddevice as sd
 from discord.ext import commands
@@ -62,49 +63,58 @@ _load_opus()
 
 # ── Audio source ───────────────────────────────────────────────────────────
 class MicrophonePCM(discord.AudioSource):
-    """Streams microphone input via sounddevice as 48kHz/16-bit stereo PCM."""
+    """Streams microphone input via sounddevice as 48kHz/16-bit Mono PCM."""
 
-    def __init__(self, channels=2, rate=48000, chunk=960, device=None):
+    # Defaulted channels to 1 for macOS compatibility
+    def __init__(self, channels=1, rate=48000, chunk=960, device=None):
         self._chunk = chunk
-        self._stream = sd.RawInputStream(
-            samplerate=rate,
-            channels=channels,
-            dtype="int16",
-            blocksize=chunk,
-            device=device,
-        )
-        self._stream.start()
+        try:
+            self._stream = sd.RawInputStream(
+                samplerate=rate,
+                channels=channels, # Now 1
+                dtype="int16",
+                blocksize=chunk,
+                device=device,
+            )
+            self._stream.start()
+        except Exception as e:
+            print(f"Failed to start stream: {e}")
+            raise e
 
     def read(self) -> bytes:
+        # Read the mono data
         data, _ = self._stream.read(self._chunk)
-        return bytes(data)
+        
+        # 'data' is the raw bytes. We need to duplicate it for 'Stereo' 
+        # so Discord doesn't get confused by the length of the data.
+        import numpy as np
+        audio_data = np.frombuffer(data, dtype=np.int16)
+        
+        # Duplicate the mono channel to make it "Fake Stereo"
+        stereo_data = np.repeat(audio_data, 2)
+        return stereo_data.tobytes()
 
     def cleanup(self):
-        self._stream.stop()
-        self._stream.close()
+        if hasattr(self, '_stream'):
+            self._stream.stop()
+            self._stream.close()
 
+# ── macOS Volume Helpers (AppleScript) ─────────────────────────────────────
+def _mac_get_volume() -> int:
+    result = subprocess.run(["osascript", "-e", "output volume of (get volume settings)"], capture_output=True, text=True)
+    return int(result.stdout.strip()) if result.stdout.strip() else 0
 
-# ── Linux volume helpers (pactl) ───────────────────────────────────────────
-def _pactl(*args) -> str:
-    return subprocess.run(["pactl"] + list(args), capture_output=True, text=True).stdout
+def _mac_is_muted() -> bool:
+    result = subprocess.run(["osascript", "-e", "output muted of (get volume settings)"], capture_output=True, text=True)
+    return "true" in result.stdout.lower()
 
+def _mac_set_volume(pct: int):
+    subprocess.run(["osascript", "-e", f"set volume output volume {pct}"])
 
-def _linux_get_volume() -> int:
-    m = re.search(r"(\d+)%", _pactl("get-sink-volume", "@DEFAULT_SINK@"))
-    return int(m.group(1)) if m else 0
-
-
-def _linux_is_muted() -> bool:
-    return "yes" in _pactl("get-sink-mute", "@DEFAULT_SINK@").lower()
-
-
-def _linux_set_volume(pct: int):
-    subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"])
-
-
-def _linux_set_mute(mute: bool):
-    subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1" if mute else "0"])
-
+def _mac_set_mute(mute: bool):
+    val = "true" if mute else "false"
+    subprocess.run(["osascript", "-e", f"set volume muted {val}"])
+    
 
 # ── Windows volume helper ──────────────────────────────────────────────────
 def _win_get_device():
@@ -206,7 +216,12 @@ class AudioCommands(commands.Cog):
             get_mute = lambda: vol.GetMute()
             set_vol = lambda pct: vol.SetMasterVolumeLevelScalar(pct / 100.0, None)
             set_mute = lambda m: vol.SetMute(1 if m else 0, None)
-        else:
+        elif platform.system() == "Darwin": # macOS check
+            get_vol = _mac_get_volume
+            get_mute = _mac_is_muted
+            set_vol = _mac_set_volume
+            set_mute = _mac_set_mute
+        else: # Linux
             get_vol = _linux_get_volume
             get_mute = _linux_is_muted
             set_vol = _linux_set_volume
