@@ -72,6 +72,19 @@ All credentials are stored in a `.env` file
     VOICE_CHANNEL_ID=
     ```
 
+3. In case env fails, go fucking rape it and do this:
+
+    ```
+    brew install portaudio
+    pip install sounddevice
+    brew install ffmpeg
+    sudo port install py311-tkinter
+    rm -rf env
+    python3.11 -m venv env
+    source env/bin/activate
+    pip install -r requirements.txt
+    ```
+
 ### Where to find each value
 
 | Config | Where to get it |
