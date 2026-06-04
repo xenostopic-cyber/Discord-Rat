@@ -1,4 +1,5 @@
 discord.py[voice]
+opencv-python
 pyobjus
 plyer
 aiohttp
